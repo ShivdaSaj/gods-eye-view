@@ -23,7 +23,7 @@ services:
     working_dir: /home/node
     environment:
       - GEV_REPO=https://github.com/ShivdaSaj/gods-eye-view.git
-      - GEV_BRANCH=claude/dazzling-cori-pn0wb7
+      - GEV_BRANCH=main
       - HOST=0.0.0.0
       - PORT=4173
       - PUPPETEER_SKIP_DOWNLOAD=1
