@@ -1,0 +1,37 @@
+# God's Eye View on a Hostinger VPS behind the shared Traefik container.
+#
+# Deploy with Hostinger's Docker Manager (or `docker compose -p godseye up -d`
+# on the VPS). The image is built on the VPS straight from this repository's
+# Dockerfile, so no registry is needed. To ship a new commit, redeploy the
+# project (Docker Manager "Update", or `docker compose build --pull && up -d`).
+#
+# HTTPS: Traefik terminates TLS on its `websecure` entrypoint and issues the
+# certificate through its `letsencrypt` resolver, matching the other apps on
+# this VPS. `godseye.sajinshivdas.online` has an A record to the VPS.
+services:
+  gods-eye-view:
+    build:
+      context: https://github.com/ShivdaSaj/gods-eye-view.git#claude/dazzling-cori-pn0wb7
+      dockerfile: Dockerfile
+    image: gods-eye-view:latest
+    container_name: gods-eye-view
+    restart: unless-stopped
+    environment:
+      # Accept the public hostname (Vite rejects unknown Host headers).
+      - GEV_ALLOWED_HOSTS=godseye.sajinshivdas.online
+      # A public instance must never expose the in-app key-entry panel: trust
+      # no gateway address. To add provider keys, list them here as
+      # `- CESIUM_ION_TOKEN` (no value) and put the value in the project's
+      # environment / .env on the VPS, never in Git. Set provider quotas and
+      # billing alerts first: every visitor uses those keys.
+      - GEV_KEY_SETUP_TRUSTED_PEERS=none
+    # No published ports: only Traefik reaches the app.
+    expose:
+      - "4173"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.godseye.rule=Host(`godseye.sajinshivdas.online`)
+      - traefik.http.routers.godseye.entrypoints=websecure
+      - traefik.http.routers.godseye.tls=true
+      - traefik.http.routers.godseye.tls.certresolver=letsencrypt
+      - traefik.http.services.godseye.loadbalancer.server.port=4173
