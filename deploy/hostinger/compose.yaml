@@ -29,12 +29,14 @@ services:
       - PUPPETEER_SKIP_DOWNLOAD=1
       # Accept the public hostname (Vite rejects unknown Host headers).
       - GEV_ALLOWED_HOSTS=godseye.sajinshivdas.online
-      # A public instance must never expose the in-app key-entry panel: trust
-      # no gateway address. To add provider keys, list them here as
-      # `- CESIUM_ION_TOKEN` (no value) and set the value in the project's
-      # environment on the VPS, never in Git. Set provider quotas and billing
-      # alerts first: every visitor uses those keys.
-      - GEV_KEY_SETUP_TRUSTED_PEERS=none
+      # POWER UP / Provider Settings: GEV_KEY_SETUP_TRUSTED_PEERS is left
+      # unset, so the launcher trusts this project's Docker gateway, which is
+      # where the loopback-only port below delivers an SSH tunnel from. The
+      # public site still cannot reach the panel: Traefik adds X-Forwarded-*
+      # headers and a non-local Host, and the panel refuses both. Open it with
+      #   ssh -L 4173:127.0.0.1:14173 root@<vps>   ->  http://localhost:4173/?setup=1
+      # Keys are saved to app/.env in the volume and survive restarts.
+      # Set provider quotas and billing alerts first: every visitor uses them.
     command:
       - sh
       - -ec
@@ -51,9 +53,10 @@ services:
     volumes:
       # Mounted over /home/node so the empty volume inherits node's ownership.
       - godseye-data:/home/node
-    # No published ports: only Traefik reaches the app.
-    expose:
-      - "4173"
+    # Public traffic goes through Traefik. This port is bound to the VPS's
+    # loopback only, for the SSH tunnel to the POWER UP panel.
+    ports:
+      - "127.0.0.1:14173:4173"
     healthcheck:
       test:
         - CMD
