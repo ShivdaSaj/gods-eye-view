@@ -75,3 +75,26 @@ code { font-size: 13px; }
 .notice.ok { border-color: var(--ok); color: var(--ok); }
 .notice.error, .error { color: var(--bad); }
 .notice.error { border-color: var(--bad); }
+.tabs { display: flex; gap: 8px; margin: 16px 0; border-bottom: 1px solid var(--line); }
+.tab { margin: 0; border-radius: 8px 8px 0 0; background: transparent; color: var(--muted); border: 1px solid transparent; border-bottom: 0; }
+.tab.active { color: var(--text); border-color: var(--line); background: var(--bg); }
+input[type="text"], input[type="search"] {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+input:disabled { opacity: 0.55; cursor: not-allowed; }
+input[type="text"]:focus, input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+details.group > summary { display: flex; justify-content: space-between; align-items: center; cursor: pointer; list-style: none; }
+details.group > summary::-webkit-details-marker { display: none; }
+details.group > summary h2::before { content: "▸ "; color: var(--muted); }
+details.group[open] > summary h2::before { content: "▾ "; }
+.help { white-space: pre-wrap; color: var(--muted); font-size: 13px; margin: 0 0 6px; }
+.hint { color: var(--accent); font-size: 13px; margin: 0; }
+[hidden] { display: none !important; }
+.bar > div { flex: 1 1 300px; }
+.bar button { margin-top: 0; }

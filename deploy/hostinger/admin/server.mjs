@@ -10,7 +10,11 @@
  *    restarts it after a key change, so the new keys load from a clean
  *    environment (an in-process Vite restart keeps the old values);
  *  - it serves a password-protected admin page at /admin on its own port,
- *    which Traefik routes to (see deploy/hostinger/compose.yaml).
+ *    which Traefik routes to (see deploy/hostinger/compose.yaml), with two
+ *    tabs: every POWER UP key, and every other setting documented in the
+ *    app's .env.example (parsed at runtime, so the list follows the app).
+ *    Settings the deployment pins (compose environment) and the ones that
+ *    decide who can reach the server are shown read-only.
  *
  * Keys are validated and written with the app's own registry and writers
  * (KEY_SETUP_KEYS, validateKeySetupUpdates, upsertDotenvValues), to the same
@@ -162,11 +166,161 @@ function keyStatus() {
     unlocks: entry.unlocks,
     getUrl: entry.getUrl,
     tier: entry.tier,
+    clientExposed: Boolean(entry.clientExposed),
     vars: entry.envVars.map((name) => ({
       name,
       set: String(values[name] ?? '').trim() !== '',
     })),
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Settings: every other variable documented in the app's .env.example
+// ---------------------------------------------------------------------------
+
+const EXAMPLE_FILE = path.join(APP_ROOT, '.env.example');
+const KEY_VARS = new Set(KEY_SETUP_KEYS.flatMap((entry) => entry.envVars));
+/** Never editable here: they decide who can reach the server. */
+const SECURITY_VARS = new Set([
+  'HOST',
+  'PORT',
+  'GEV_ALLOWED_HOSTS',
+  'GEV_KEY_SETUP_TRUSTED_PEERS',
+]);
+const SECRET_PATTERN = /KEY|TOKEN|SECRET|PASSWORD|CERTIFICATE|CREDENTIAL/;
+const SETTING_VALUE_LIMIT = 2048;
+const SETTING_GROUPS = [
+  ['Rate limits', /^GEV_RATELIMIT_/],
+  ['OpenAI voice & chat', /^OPENAI_|^GEV_PREFER_CODEX_OAUTH$|^GEV_VOICE_/],
+  ['Gemini', /^GEMINI_/],
+  ['Flights', /^OPENSKY_/],
+  ['Ships (AIS)', /AIS/],
+  ['Traffic', /^TOMTOM_/],
+  ['Cameras (CCTV)', /^CCTV_|^ONTARIO_|^OTTAWA_/],
+  ['Map search & OpenStreetMap', /^OVERPASS_|^NOMINATIM_|^PHOTON_/],
+  ['News', /NEWS|^LIVEUAMAP_/],
+  ['Launches', /^LL2_/],
+];
+
+const groupOf = (name) =>
+  SETTING_GROUPS.find(([, pattern]) => pattern.test(name))?.[0] || 'General';
+
+/**
+ * Parse .env.example into [{name, description, default}] in file order. A
+ * comment block describes the first variable after it; variables that follow
+ * in the same run share that block, so only the first one carries it.
+ */
+let schemaCache = null;
+function settingsSchema() {
+  if (schemaCache) return schemaCache;
+  const assignment = /^\s*(#\s*)?(?:export\s+)?([A-Z][A-Z0-9_]*)=(.*)$/;
+  const seen = new Set();
+  const schema = [];
+  let prose = [];
+  let consumed = false;
+  for (const line of readFileSync(EXAMPLE_FILE, 'utf8').split(/\r?\n/)) {
+    const match = assignment.exec(line);
+    if (match) {
+      const [, , name, raw] = match;
+      if (!seen.has(name)) {
+        seen.add(name);
+        const fallback = raw.replace(/\s+#.*$/, '').trim();
+        schema.push({
+          name,
+          description: consumed ? '' : prose.join('\n'),
+          default: SECRET_PATTERN.test(name) ? '' : fallback,
+        });
+      }
+      consumed = true;
+      continue;
+    }
+    if (/^\s*#/.test(line)) {
+      if (consumed) {
+        prose = [];
+        consumed = false;
+      }
+      prose.push(line.replace(/^\s*#\s?/, ''));
+    } else if (line.trim() === '') {
+      if (consumed) {
+        prose = [];
+        consumed = false;
+      }
+    }
+  }
+  schemaCache = schema.filter(
+    (entry) => !KEY_VARS.has(entry.name) && !entry.name.startsWith('GEV_ADMIN_'),
+  );
+  return schemaCache;
+}
+
+/** Set by the deployment (compose) or security-relevant: shown, not editable. */
+const lockedSetting = (name) =>
+  SECURITY_VARS.has(name) || Object.hasOwn(process.env, name);
+
+function settingsStatus() {
+  const values = storeValues();
+  const groups = new Map();
+  for (const entry of settingsSchema()) {
+    const secret = SECRET_PATTERN.test(entry.name);
+    const locked = lockedSetting(entry.name);
+    const stored = String(values[entry.name] ?? '');
+    const effective = locked ? String(process.env[entry.name] ?? '') : stored;
+    const group = groupOf(entry.name);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push({
+      name: entry.name,
+      description: entry.description,
+      default: entry.default,
+      secret,
+      locked,
+      set: effective.trim() !== '',
+      value: secret ? '' : effective,
+    });
+  }
+  const order = [...SETTING_GROUPS.map(([label]) => label), 'General'];
+  return order
+    .filter((label) => groups.has(label))
+    .map((label) => ({ group: label, vars: groups.get(label) }));
+}
+
+/** Validate {NAME: value|null}; null resets the setting to its default. */
+function validateSettingUpdates(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body))
+    return { ok: false, error: 'Body must be a JSON object' };
+  const entries = Object.entries(body);
+  if (!entries.length) return { ok: false, error: 'Nothing to save' };
+  if (entries.length > 64)
+    return { ok: false, error: 'At most 64 settings per save' };
+  const known = new Set(settingsSchema().map((entry) => entry.name));
+  const updates = {};
+  for (const [name, raw] of entries) {
+    if (!known.has(name)) return { ok: false, error: `Unknown setting: ${name}` };
+    if (lockedSetting(name))
+      return { ok: false, error: `${name} is set by the deployment` };
+    if (raw === null) {
+      updates[name] = null;
+      continue;
+    }
+    if (typeof raw !== 'string')
+      return { ok: false, error: `${name} must be text` };
+    const value = raw.trim();
+    if (!value) {
+      updates[name] = null;
+      continue;
+    }
+    if (value.length > SETTING_VALUE_LIMIT)
+      return { ok: false, error: `${name} is too long` };
+    // Written unquoted to .env, so refuse what dotenv would read back
+    // differently: line breaks, comments, expansion, escapes, outer quotes.
+    if (/[\x00-\x1f\x7f#$\\`]/.test(value) || /^["']|["']$/.test(value)) {
+      return {
+        ok: false,
+        error: `${name} cannot contain line breaks, #, $, \\, backticks or surrounding quotes`,
+      };
+    }
+    updates[name] = value;
+  }
+  return { ok: true, updates };
 }
 
 function writeStore(updates) {
@@ -344,21 +498,35 @@ const loginPage = (message = '') =>
 
 const panelPage = () =>
   page(
-    'GEV Admin · Keys',
+    'GEV Admin',
     `<main class="card">
   <header class="bar">
     <div>
-      <h1>Provider keys</h1>
-      <p class="muted">Values are never shown. Saving restarts the globe (about 10 seconds). Every visitor uses these keys, so set quotas and billing alerts with each provider.</p>
+      <h1>God's Eye View · Admin</h1>
+      <p class="muted">Saving restarts the globe (about 10 seconds). Every visitor uses these keys, so set quotas and billing alerts with each provider.</p>
     </div>
     <form method="post" action="/admin/logout"><button type="submit" class="ghost">Sign out</button></form>
   </header>
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab active" data-tab="keys" role="tab">POWER UP keys</button>
+    <button type="button" class="tab" data-tab="settings" role="tab">Settings</button>
+  </nav>
   <p id="notice" class="notice" hidden></p>
-  <form id="keys" autocomplete="off">
-    <div id="list" class="list"><p class="muted">Loading…</p></div>
+  <form id="keys" class="pane" data-pane="keys" autocomplete="off">
+    <p class="muted">Every provider from the in-app POWER UP panel. Values are never shown; paste a new one to replace it.</p>
+    <div id="key-list" class="list"><p class="muted">Loading…</p></div>
     <div class="actions">
       <a href="/" class="ghost button">Open the globe</a>
-      <button type="submit" id="save">Save changes</button>
+      <button type="submit">Save keys</button>
+    </div>
+  </form>
+  <form id="settings" class="pane" data-pane="settings" autocomplete="off" hidden>
+    <p class="muted">Every other option the app reads from its environment, with the help text from <code>.env.example</code>. Leave a field empty to use the default. Settings marked <em>deployment</em> are fixed in the Docker Manager compose file.</p>
+    <input id="filter" type="search" placeholder="Filter settings, e.g. CCTV or rate">
+    <div id="setting-list" class="list"><p class="muted">Loading…</p></div>
+    <div class="actions">
+      <a href="/" class="ghost button">Open the globe</a>
+      <button type="submit">Save settings</button>
     </div>
   </form>
 </main>
@@ -446,11 +614,15 @@ async function handle(req, res) {
     if (route === '/admin/api/status' && req.method === 'GET') {
       return sendJson(res, 200, {
         keys: keyStatus(),
+        settings: settingsStatus(),
         restarting: Boolean(restarting),
       });
     }
 
-    if (route === '/admin/api/keys' && req.method === 'POST') {
+    if (
+      (route === '/admin/api/keys' || route === '/admin/api/settings') &&
+      req.method === 'POST'
+    ) {
       if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Bad origin' });
       if (
         !String(req.headers['content-type'] || '').startsWith(
@@ -465,7 +637,10 @@ async function handle(req, res) {
       } catch (error) {
         return sendJson(res, error?.status || 400, { error: 'Invalid JSON' });
       }
-      const verdict = validateKeySetupUpdates(body);
+      const verdict =
+        route === '/admin/api/keys'
+          ? validateKeySetupUpdates(body)
+          : validateSettingUpdates(body);
       if (!verdict.ok) return sendJson(res, 400, { error: verdict.error });
       try {
         writeStore(verdict.updates);
@@ -478,7 +653,12 @@ async function handle(req, res) {
         `[Admin] Updated ${names.join(', ')} from ${clientOf(req)}; restarting the app.`,
       );
       restartApp();
-      return sendJson(res, 200, { ok: true, saved: names, keys: keyStatus() });
+      return sendJson(res, 200, {
+        ok: true,
+        saved: names,
+        keys: keyStatus(),
+        settings: settingsStatus(),
+      });
     }
   }
 
