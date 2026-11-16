@@ -10,6 +10,11 @@
 # project. `.env`, `.gev-cache` and `.gev-logs` live in the volume, so they
 # survive restarts and updates.
 #
+# Admin panel: https://godseye.sajinshivdas.online/admin edits the provider
+# keys (deploy/hostinger/admin/server.mjs). It stays disabled until you set
+# GEV_ADMIN_PASSWORD (12+ characters) in the project's environment in Docker
+# Manager, never in this file or in Git.
+#
 # HTTPS: Traefik terminates TLS on its `websecure` entrypoint and issues the
 # certificate through its `letsencrypt` resolver, matching the other apps on
 # this VPS. `godseye.sajinshivdas.online` has an A record to the VPS.
@@ -29,14 +34,13 @@ services:
       - PUPPETEER_SKIP_DOWNLOAD=1
       # Accept the public hostname (Vite rejects unknown Host headers).
       - GEV_ALLOWED_HOSTS=godseye.sajinshivdas.online
-      # POWER UP / Provider Settings: GEV_KEY_SETUP_TRUSTED_PEERS is left
-      # unset, so the launcher trusts this project's Docker gateway, which is
-      # where the loopback-only port below delivers an SSH tunnel from. The
-      # public site still cannot reach the panel: Traefik adds X-Forwarded-*
-      # headers and a non-local Host, and the panel refuses both. Open it with
-      #   ssh -L 4173:127.0.0.1:14173 root@<vps>   ->  http://localhost:4173/?setup=1
-      # Keys are saved to app/.env in the volume and survive restarts.
-      # Set provider quotas and billing alerts first: every visitor uses them.
+      # The in-app POWER UP panel cannot work behind a public proxy; keys are
+      # edited at /admin instead, so trust no gateway address.
+      - GEV_KEY_SETUP_TRUSTED_PEERS=none
+      # Admin panel. The password comes from the project's environment.
+      - GEV_ADMIN_PASSWORD
+      - GEV_ADMIN_ORIGIN=https://godseye.sajinshivdas.online
+      - GEV_ADMIN_PORT=4174
     command:
       - sh
       - -ec
@@ -49,14 +53,15 @@ services:
         fi
         cd app
         npm ci --no-audit --no-fund
-        exec node scripts/docker-start.mjs
+        # Runs the app (scripts/docker-start.mjs) and the admin panel.
+        exec node deploy/hostinger/admin/server.mjs
     volumes:
       # Mounted over /home/node so the empty volume inherits node's ownership.
       - godseye-data:/home/node
-    # Public traffic goes through Traefik. This port is bound to the VPS's
-    # loopback only, for the SSH tunnel to the POWER UP panel.
-    ports:
-      - "127.0.0.1:14173:4173"
+    # No published ports: only Traefik reaches the app (4173) and admin (4174).
+    expose:
+      - "4173"
+      - "4174"
     healthcheck:
       test:
         - CMD
@@ -74,7 +79,16 @@ services:
       - traefik.http.routers.godseye.entrypoints=websecure
       - traefik.http.routers.godseye.tls=true
       - traefik.http.routers.godseye.tls.certresolver=letsencrypt
+      - traefik.http.routers.godseye.service=godseye
       - traefik.http.services.godseye.loadbalancer.server.port=4173
+      # /admin goes to the admin panel; the longer rule wins by priority.
+      - traefik.http.routers.godseye-admin.rule=Host(`godseye.sajinshivdas.online`) && PathPrefix(`/admin`)
+      - traefik.http.routers.godseye-admin.priority=100
+      - traefik.http.routers.godseye-admin.entrypoints=websecure
+      - traefik.http.routers.godseye-admin.tls=true
+      - traefik.http.routers.godseye-admin.tls.certresolver=letsencrypt
+      - traefik.http.routers.godseye-admin.service=godseye-admin
+      - traefik.http.services.godseye-admin.loadbalancer.server.port=4174
 
 volumes:
   godseye-data:
